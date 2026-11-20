@@ -1,0 +1,9 @@
+*.exe
+*.dll
+*.bak
+*.tmp
+*.zip
+__pycache__/
+*.py[cod]
+.venv/
+.env
