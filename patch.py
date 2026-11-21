@@ -9,10 +9,14 @@ import sys
 
 TARGET = None
 BACKUP = None
-ORIGINAL_SHA = '2668b2580d890c0c2b6d0b7befb8069891c15f39ea12917ac8fa26bd06a14eb9'
-LIMIT_RVA = 0xAAD1A8
-LOADER_RVA = 0x4034DB
-LOADER_BYTES = bytes.fromhex('F2 0F 10 35 C5 9C 6A 00')
+PROFILES = [
+    ('1.19 beta', '2668b2580d890c0c2b6d0b7befb8069891c15f39ea12917ac8fa26bd06a14eb9',
+     0xAAD1A8, 0x4034DB, bytes.fromhex('F2 0F 10 35 C5 9C 6A 00')),
+    ('1.20 beta', '244d41635e9b0f4126dbed6a943824c5b4576171f796d4dafe5343762d590e17',
+     0xAE5F90, 0x40B8CB, bytes.fromhex('F2 0F 10 35 BD A6 6D 00')),
+]
+ORIGINAL_SHA = None
+BUILD = None
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
@@ -32,19 +36,27 @@ def offset(data, rva):
     raise ValueError('RVA outside file sections')
 
 def variants(data):
-    loc = offset(data, LIMIT_RVA)
-    code = offset(data, LOADER_RVA)
-    if data[code:code+8] != LOADER_BYTES:
-        raise ValueError('Track loader signature mismatch; refusing to patch')
-    original = bytearray(data)
-    original[loc:loc+8] = struct.pack('<d', 600.0)
-    if sha(original) != ORIGINAL_SHA:
-        raise ValueError('Unsupported or modified game version; refusing to patch')
-    patched = bytearray(original)
-    patched[loc:loc+8] = struct.pack('<d', 1200.0)
-    if bytes(data) not in (bytes(original), bytes(patched)):
-        raise ValueError('Unrecognized limit value; refusing to patch')
-    return bytes(original), bytes(patched), loc
+    global ORIGINAL_SHA, BUILD
+    for build, expected_sha, limit_rva, loader_rva, signature in PROFILES:
+        try:
+            loc = offset(data, limit_rva)
+            code = offset(data, loader_rva)
+        except (ValueError, struct.error, IndexError):
+            continue
+        if data[code:code+len(signature)] != signature:
+            continue
+        original = bytearray(data)
+        original[loc:loc+8] = struct.pack('<d', 600.0)
+        if sha(original) != expected_sha:
+            continue
+        patched = bytearray(original)
+        patched[loc:loc+8] = struct.pack('<d', 1200.0)
+        if bytes(data) not in (bytes(original), bytes(patched)):
+            continue
+        ORIGINAL_SHA, BUILD = expected_sha, build
+        return bytes(original), bytes(patched), loc
+    raise ValueError('Unsupported or modified game build; refusing to patch')
+
 
 def ensure_closed():
     result = subprocess.run(['powershell.exe', '-NoProfile', '-Command',
@@ -76,9 +88,13 @@ def main():
     args = parser.parse_args()
     global TARGET, BACKUP
     TARGET = args.game_dir.resolve() / 'NimbyRails.exe'
-    BACKUP = TARGET.with_name('NimbyRails.exe.speed-limit-original.bak')
     current = TARGET.read_bytes()
     original, patched, loc = variants(current)
+    BACKUP = TARGET.with_name('NimbyRails.exe.speed-limit-' + ORIGINAL_SHA[:12] + '.bak')
+    legacy = TARGET.with_name('NimbyRails.exe.speed-limit-original.bak')
+    if not BACKUP.exists() and legacy.exists() and sha(legacy.read_bytes()) == ORIGINAL_SHA:
+        BACKUP = legacy
+    print('Recognized build: ' + BUILD)
     if args.action == 'selftest':
         assert len(original) == len(patched)
         assert original[:loc] == patched[:loc] and original[loc+8:] == patched[loc+8:]
